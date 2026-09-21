@@ -340,7 +340,7 @@ class ArXivProvider(DiscoveryProvider):
     
     name = "arxiv"
     source = PaperSource.ARXIV  # type: ignore
-    BASE_URL = "http://export.arxiv.org/api/query"
+    BASE_URL = "https://export.arxiv.org/api/query"
     
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
@@ -366,7 +366,7 @@ class ArXivProvider(DiscoveryProvider):
         }
         
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
                 response = await client.get(self.BASE_URL, params=params)
                 response.raise_for_status()
                 
@@ -533,13 +533,14 @@ class CrossrefProvider(DiscoveryProvider):
             doi = item.get("DOI")
             
             # Get URLs
-            url = None
+            url = item.get("URL") if isinstance(item.get("URL"), str) else None
             pdf_url = None
-            for url_item in item.get("URL", []):
-                if url_item.get("content-type") == "application/pdf":
-                    pdf_url = url_item.get("URL")
-                elif not url:
-                    url = url_item.get("URL")
+            links = item.get("link", [])
+            if isinstance(links, list):
+                for link in links:
+                    if isinstance(link, dict) and link.get("content-type") == "application/pdf":
+                        pdf_url = link.get("URL")
+                        break
             
             if not url and doi:
                 url = f"https://doi.org/{doi}"
@@ -789,6 +790,23 @@ class DiscoveryService:
         if provider:
             return await provider.get_pdf_url(paper)
         return paper.pdf_url
+
+    async def discover_papers(
+        self,
+        query: str,
+        limit: int = 10,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        sources: Optional[List[str]] = None,
+    ) -> List[PaperMetadata]:
+        """Workflow-compatible alias for search()."""
+        return await self.search(
+            query=query,
+            year_min=year_min,
+            year_max=year_max,
+            max_results=limit,
+            sources=sources,
+        )
     
     def _get_provider_for_source(self, source: PaperSource) -> Optional[DiscoveryProvider]:
         """Get provider instance for a paper source."""

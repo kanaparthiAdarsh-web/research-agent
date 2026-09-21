@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pathlib import Path
 import json
+from uuid import uuid4
 
 # Use canonical schemas from app.schemas
 from app.schemas import (
@@ -509,6 +510,110 @@ class PaperCardRepository:
         )
 
 
+class ChunkRepository:
+    """Repository for paper text chunks operations with provenance."""
+    
+    def __init__(self, db: SQLiteConnection):
+        self.db = db
+    
+    def save(self, chunk: Any) -> bool:
+        """Save a chunk to SQLite."""
+        try:
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            chunk_id = getattr(chunk, "chunk_id", getattr(chunk, "id", None))
+            paper_id = getattr(chunk, "paper_id", getattr(chunk, "paper_doi", None))
+            text = getattr(chunk, "text", getattr(chunk, "content", ""))
+            section_type = getattr(chunk, "section_type", None)
+            section_title = getattr(chunk, "section_title", None)
+            page_numbers = getattr(chunk, "page_numbers", None)
+            if page_numbers is None and hasattr(chunk, "page_number") and chunk.page_number is not None:
+                page_numbers = [chunk.page_number]
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO chunks
+                (chunk_id, paper_id, text, section_type, section_title, page_numbers, is_partial, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                chunk_id,
+                paper_id,
+                text,
+                section_type,
+                section_title,
+                json.dumps(page_numbers) if page_numbers else None,
+                getattr(chunk, "is_partial", False),
+                json.dumps(getattr(chunk, "metadata", {})) if getattr(chunk, "metadata", None) else None,
+            ))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error("Failed to save chunk %s: %s", getattr(chunk, "id", getattr(chunk, "chunk_id", "")), e)
+            return False
+
+    def save_chunk(self, chunk: Any) -> Any:
+        self.save(chunk)
+        return chunk
+
+    def save_chunks(self, chunks: List[Any]) -> bool:
+        """Save multiple chunks in a single transaction."""
+        try:
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            for chunk in chunks:
+                chunk_id = getattr(chunk, "chunk_id", getattr(chunk, "id", None))
+                paper_id = getattr(chunk, "paper_id", getattr(chunk, "paper_doi", None))
+                text = getattr(chunk, "text", getattr(chunk, "content", ""))
+                section_type = getattr(chunk, "section_type", None)
+                section_title = getattr(chunk, "section_title", None)
+                page_numbers = getattr(chunk, "page_numbers", None)
+                if page_numbers is None and hasattr(chunk, "page_number") and chunk.page_number is not None:
+                    page_numbers = [chunk.page_number]
+                cursor.execute("""
+                    INSERT OR REPLACE INTO chunks
+                    (chunk_id, paper_id, text, section_type, section_title, page_numbers, is_partial, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    chunk_id,
+                    paper_id,
+                    text,
+                    section_type,
+                    section_title,
+                    json.dumps(page_numbers) if page_numbers else None,
+                    getattr(chunk, "is_partial", False),
+                    json.dumps(getattr(chunk, "metadata", {})) if getattr(chunk, "metadata", None) else None,
+                ))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error("Failed to save chunks batch: %s", e)
+            return False
+
+    def get_by_paper(self, paper_id: str) -> List[Dict[str, Any]]:
+        """Get all chunks for a paper."""
+        try:
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM chunks WHERE paper_id = ?", (paper_id,))
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error("Failed to get chunks for paper %s: %s", paper_id, e)
+            return []
+
+    def get_all(self) -> List[Dict[str, Any]]:
+        """Get all chunks."""
+        try:
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM chunks")
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error("Failed to get all chunks: %s", e)
+            return []
+
+
 class JobRepository:
     """Repository for research job operations."""
     
@@ -623,8 +728,20 @@ class JobRepository:
         if not job:
             return None
         for k, v in kwargs.items():
-            if hasattr(job, k):
-                setattr(job, k, v)
+            if k == "progress":
+                pct = float(v) * 100.0 if float(v) <= 1.0 else float(v)
+                setattr(job, "progress_percentage", pct)
+            elif k == "status":
+                if hasattr(v, "value"):
+                    v = v.value
+                setattr(job, "status", v)
+            elif k == "processed_papers":
+                pass
+            elif hasattr(job, k):
+                try:
+                    setattr(job, k, v)
+                except Exception:
+                    pass
         setattr(job, "updated_at", datetime.utcnow())
         self.save(job)
         return job
@@ -686,7 +803,7 @@ class JobRepository:
             year_min=row["year_min"],
             year_max=row["year_max"],
             conferences=json.loads(row["conferences"]) if row["conferences"] else None,
-            max_papers=row["max_papers"] or 10,
+            max_papers=max(5, row["max_papers"]) if row["max_papers"] else 10,
             status=WorkflowStatus(row["status"]) if row["status"] in [s.value for s in WorkflowStatus] else WorkflowStatus.PENDING,
             progress_percentage=row["progress_percentage"] or 0.0,
             current_step=WorkflowStep(row["current_step"]) if row["current_step"] in [s.value for s in WorkflowStep] else None,
@@ -1079,7 +1196,7 @@ class GapRepository:
             """, (
                 vid, gid, str(status),
                 getattr(ver, "supporting_evidence_count", 0),
-                json.dumps(ce_serialized),
+                json.dumps(ce_serialized, default=str),
                 getattr(ver, "coverage_summary", ""),
                 getattr(ver, "reasoning", ""),
                 getattr(ver, "assessment_confidence", 0.7),
@@ -1211,6 +1328,7 @@ def get_repositories(db_path: str = "research_agent.db"):
     direction_repo = ResearchDirectionRepository(db)
     job_repo = JobRepository(db)
     paper_repo = PaperRepository(db)
+    chunk_repo = ChunkRepository(db)
 
     return {
         "papers": paper_repo,
@@ -1223,4 +1341,5 @@ def get_repositories(db_path: str = "research_agent.db"):
         "comparisons": comparison_repo,
         "gaps": gap_repo,
         "directions": direction_repo,
+        "chunks": chunk_repo,
     }
