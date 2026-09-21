@@ -1,0 +1,6 @@
+{
+  "name": "Research Agent",
+  "description": "Autonomous literature review and scientific paper intelligence system for discovery, synthesis, evidence extraction, limitation analysis, and research gap identification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
